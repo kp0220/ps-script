@@ -1,0 +1,129 @@
+# Azure RBAC + PIM Report
+
+This PowerShell script generates a consolidated Azure RBAC and PIM (Privileged Identity Management) report for users, security groups, and service principals across subscriptions. It inspects normal (permanent) role assignments, PIM-eligible assignments, and PIM active / time-bound assignments, and includes management-group-level checks when available.
+
+> Script file: AZ_RBAC_REPORT_USER_GROUP_SERVICE-PRINCIPLE
+
+## Features
+- Scans each subscription provided in an input CSV for role assignments.
+- Detects:
+  - Normal / permanent Azure RBAC assignments
+  - PIM eligible assignments
+  - PIM active / time-bound assignments
+- Also checks assignment scope types: Subscription, Resource Group, Resource, and Management Group (if retrievable).
+- Outputs a flattened CSV with assignment details and management group hierarchy info.
+
+## Supported object types
+- User
+- Security Group
+- Service Principal
+
+## Prerequisites
+- PowerShell (Windows PowerShell or PowerShell Core)
+- Az PowerShell modules:
+  - Az.Accounts
+  - Az.Resources
+
+Install modules (run once if needed):
+
+```powershell
+Install-Module Az.Accounts -Scope CurrentUser
+Install-Module Az.Resources -Scope CurrentUser
+```
+
+## Authentication
+The script calls `Connect-AzAccount` and requires an authenticated session that has at least read access to role assignments on the target subscriptions (and to management groups if you want management group checks).
+
+## Input CSV
+The script expects a CSV file with these required columns (case-insensitive):
+- subscription
+- subscriptionid
+- user/group/serviceprinciple
+
+Example CSV content:
+subscription,subscriptionid,user/group/serviceprinciple
+Connectivity,8a79fe1c-45c1-4fb6-81df-5fa1b9f0a3d8,a-MRWellborn
+Dev-Test,b14faae7-cd5f-4fdb-857d-7b55a3131809,a-MRWellborn
+ExpressRoute,1bba1dad-c588-476a-ac2a-11a7ab9fd3bd,a-JJBode
+
+Place your CSV and update the $InputCsv variable in the script (or modify the script to accept a parameter).
+
+## Configuration (in-script variables)
+At the top of the script you will find:
+
+```powershell
+$InputCsv  = "C:\Temp\UserSubscriptions_1.csv"
+$OutputCsv = "C:\Temp\Azure-RBAC-PIM-Report_1.csv"
+```
+Adjust these paths as needed.
+
+## Output
+The script writes results to the configured output CSV. Key columns include (the script writes these fields in the output):
+- InputSubscription
+- SubscriptionId
+- ObjectName
+- DisplayName
+- ObjectType
+- ObjectId
+- DuplicateObject
+- RoleName
+- RoleDefinitionId
+- RoleDescription
+- AssignmentId
+- AssignmentObjectType
+- AssignmentType
+- AssignmentStatus
+- Scope
+- ScopeType
+- ScopeName
+- Inherited
+- AssignmentSource
+- StartDateTime
+- EndDateTime
+- ManagementGroupName
+- ManagementGroupDisplayName
+- Status
+
+(These match the Add-Result output in the script.)
+
+## How it works (high level)
+1. Validates and normalizes the input CSV.
+2. Builds a management group hierarchy (if management group read permission exists).
+3. For each input row (subscription + object), the script:
+   - Identifies whether the object is a user, group, or service principal.
+   - Queries role assignments and PIM role assignment information at subscription, management group, resource group or resource scopes.
+   - Uses caches (role definition cache, management group cache) to reduce duplicate calls.
+4. Aggregates findings into a single CSV.
+
+## Running the script
+1. Open PowerShell.
+2. Ensure required modules are installed.
+3. Authenticate to Azure:
+
+```powershell
+Connect-AzAccount
+```
+4. Run the script (from the script directory):
+
+```powershell
+.\AZ_RBAC_REPORT_USER_GROUP_SERVICE-PRINCIPLE
+```
+Note: If the file has no `.ps1` extension in the repo, save it locally as `AZ_RBAC_REPORT_USER_GROUP_SERVICE-PRINCIPLE.ps1` or run with `powershell -File`.
+
+## Notes & troubleshooting
+- If Az.ManagementGroup APIs are not accessible to your account or the Az.Management module is not present, the script will warn and skip management-group checks.
+- If required Az modules are not available, the script will throw a helpful message and stop. Install them with Install-Module as shown above.
+- The script prints informative messages to the console while processing rows; check console output for warnings.
+- Duplicate objects: the script calculates duplicates across the input file and includes a DuplicateObject count in the output.
+- Large environments may take time due to the number of role assignments and management group lookups.
+
+## Extending or customizing
+- Make the input/output file paths parameters instead of hard-coded variables.
+- Add logging to file (e.g., Start-Transcript / Stop-Transcript or write to a log file).
+- Add filtering logic (roles, scopes, or object types) if you only need a subset of assignments.
+
+## License
+No license file included. Add a LICENSE to the repository if you wish to publish this script with a specific license.
+
+## Contact / Attribution
+For questions about the script, inspect or open an issue in the repository where the script is hosted.
