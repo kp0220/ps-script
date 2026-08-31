@@ -1,0 +1,2508 @@
+# ============================================================
+# Azure RBAC + PIM Report
+#
+# INPUT CSV:
+#
+# subscription,subscriptionid,user/group/serviceprinciple
+#
+# Example:
+#
+# Connectivity,8a79fe1c-45c1-4fb6-81df-5fa1b9f0a3d8,a-MRWellborn
+# Dev-Test,b14faae7-cd5f-4fdb-857d-7b55a3131809,a-MRWellborn
+# ExpressRoute,1bba1dad-c588-476a-ac2a-11a7ab9fd3bd,a-JJBode
+#
+#
+# CHECKS:
+#
+# 1. Normal / Permanent Azure RBAC
+# 2. PIM Eligible Azure RBAC
+# 3. PIM Active / Time-Bound Azure RBAC
+# 4. Management Group Normal RBAC
+# 5. Management Group PIM Eligible
+# 6. Management Group PIM Active / Time-Bound
+#
+#
+# SUPPORTED OBJECTS:
+#
+# - User
+# - Security Group
+# - Service Principal
+#
+#
+# OUTPUT:
+#
+# - InputSubscription
+# - SubscriptionId
+# - ObjectName
+# - ObjectType
+# - ObjectId
+# - DuplicateObject
+# - RoleName
+# - AssignmentType
+# - AssignmentStatus
+# - Scope
+# - ScopeType
+# - ScopeName
+# - Inherited
+# - AssignmentSource
+# - StartDateTime
+# - EndDateTime
+# - Management Group information
+# - Status
+#
+# ============================================================
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+$InputCsv  = "C:\Temp\UserSubscriptions_1.csv"
+
+$OutputCsv = "C:\Temp\Azure-RBAC-PIM-Report_1.csv"
+
+
+# ============================================================
+# REQUIRED MODULES
+# ============================================================
+
+# Install once if required:
+#
+# Install-Module Az.Accounts -Scope CurrentUser
+# Install-Module Az.Resources -Scope CurrentUser
+#
+# ============================================================
+
+
+if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
+
+    throw "Az.Accounts module is not installed. Run: Install-Module Az.Accounts -Scope CurrentUser"
+}
+
+
+if (-not (Get-Module -ListAvailable -Name Az.Resources)) {
+
+    throw "Az.Resources module is not installed. Run: Install-Module Az.Resources -Scope CurrentUser"
+}
+
+
+Import-Module Az.Accounts
+Import-Module Az.Resources
+
+
+# ============================================================
+# LOGIN
+# ============================================================
+
+Write-Host ""
+Write-Host "========================================================" `
+    -ForegroundColor Cyan
+
+Write-Host "Connecting to Azure..." `
+    -ForegroundColor Cyan
+
+Write-Host "========================================================" `
+    -ForegroundColor Cyan
+
+
+Connect-AzAccount
+
+
+# ============================================================
+# IMPORT INPUT CSV
+# ============================================================
+
+if (-not (Test-Path $InputCsv)) {
+
+    throw "Input CSV not found: $InputCsv"
+}
+
+
+$InputRows = @(
+    Import-Csv -Path $InputCsv
+)
+
+
+if ($InputRows.Count -eq 0) {
+
+    throw "Input CSV is empty."
+}
+
+
+# ============================================================
+# NORMALIZE CSV HEADER NAMES
+# ============================================================
+
+foreach ($Row in $InputRows) {
+
+    foreach ($Property in @($Row.PSObject.Properties)) {
+
+        $CleanName =
+            $Property.Name.Trim()
+
+
+        if ($CleanName -ne $Property.Name) {
+
+            $Value =
+                $Property.Value
+
+
+            $Row.PSObject.Properties.Remove(
+                $Property.Name
+            )
+
+
+            $Row |
+                Add-Member `
+                    -NotePropertyName $CleanName `
+                    -NotePropertyValue $Value
+        }
+    }
+}
+
+
+# ============================================================
+# REQUIRED CSV COLUMNS
+# ============================================================
+
+$RequiredColumns = @(
+    "subscription",
+    "subscriptionid",
+    "user/group/serviceprinciple"
+)
+
+
+$CsvColumns =
+    @(
+        $InputRows[0].PSObject.Properties.Name
+    )
+
+
+foreach ($RequiredColumn in $RequiredColumns) {
+
+    if ($RequiredColumn -notin $CsvColumns) {
+
+        throw `
+            "Required CSV column missing: [$RequiredColumn]"
+    }
+}
+
+
+# ============================================================
+# DEBUG - SHOW INPUT
+# ============================================================
+
+Write-Host ""
+Write-Host "========================================================" `
+    -ForegroundColor Cyan
+
+Write-Host "INPUT CSV VALIDATION" `
+    -ForegroundColor Cyan
+
+Write-Host "========================================================" `
+    -ForegroundColor Cyan
+
+
+Write-Host ""
+Write-Host "Input file:" `
+    -ForegroundColor Yellow
+
+Write-Host $InputCsv
+
+
+Write-Host ""
+Write-Host "Input rows: $($InputRows.Count)" `
+    -ForegroundColor Yellow
+
+
+Write-Host ""
+Write-Host "CSV columns:" `
+    -ForegroundColor Yellow
+
+
+foreach ($Column in $CsvColumns) {
+
+    Write-Host "  [$Column]"
+}
+
+
+Write-Host ""
+Write-Host "Input data:" `
+    -ForegroundColor Yellow
+
+
+foreach ($Row in $InputRows) {
+
+    Write-Host ""
+    Write-Host "  Subscription : $($Row.subscription)"
+    Write-Host "  SubscriptionId: $($Row.subscriptionid)"
+    Write-Host "  Object       : $($Row.'user/group/serviceprinciple')"
+}
+
+
+# ============================================================
+# RESULTS
+# ============================================================
+
+$Results = @()
+
+
+# ============================================================
+# CACHES
+# ============================================================
+
+$RoleDefinitionCache = @{}
+
+$SubscriptionManagementGroupCache = @{}
+
+
+# ============================================================
+# DUPLICATE OBJECT COUNT
+# ============================================================
+
+$ObjectOccurrenceMap = @{}
+
+
+foreach ($Row in $InputRows) {
+
+    $ObjectName =
+        $Row."user/group/serviceprinciple"
+
+
+    if ($null -eq $ObjectName) {
+
+        continue
+    }
+
+
+    $ObjectName =
+        $ObjectName.Trim()
+
+
+    if ([string]::IsNullOrWhiteSpace($ObjectName)) {
+
+        continue
+    }
+
+
+    $ObjectKey =
+        $ObjectName.ToLower()
+
+
+    if ($ObjectOccurrenceMap.ContainsKey($ObjectKey)) {
+
+        $ObjectOccurrenceMap[$ObjectKey]++
+    }
+    else {
+
+        $ObjectOccurrenceMap[$ObjectKey] = 1
+    }
+}
+
+
+# ============================================================
+# FUNCTION
+#
+# ADD RESULT
+#
+# IMPORTANT:
+#
+# Uses $script:Results so the function modifies the main
+# Results collection.
+#
+# ============================================================
+
+function Add-Result {
+
+    param(
+
+        [string]$InputSubscription,
+
+        [string]$DuplicateObject,
+
+        [string]$ObjectName,
+
+        [string]$DisplayName,
+
+        [string]$ObjectType,
+
+        [string]$ObjectId,
+
+        [string]$UserPrincipalName,
+
+        [string]$AppId,
+
+        [string]$SubscriptionName,
+
+        [string]$SubscriptionId,
+
+        [string]$RoleName,
+
+        [string]$RoleDefinitionId,
+
+        [string]$RoleDescription,
+
+        [string]$AssignmentId,
+
+        [string]$AssignmentObjectType,
+
+        [string]$AssignmentType,
+
+        [string]$AssignmentStatus,
+
+        [string]$Scope,
+
+        [string]$ScopeType,
+
+        [string]$ScopeName,
+
+        [string]$Inherited,
+
+        [string]$AssignmentSource,
+
+        [string]$StartDateTime,
+
+        [string]$EndDateTime,
+
+        [string]$ManagementGroupName,
+
+        [string]$ManagementGroupDisplayName,
+
+        [string]$Status
+    )
+
+
+    $script:Results +=
+        [PSCustomObject]@{
+
+            InputSubscription =
+                $InputSubscription
+
+            DuplicateObject =
+                $DuplicateObject
+
+            ObjectName =
+                $ObjectName
+
+            DisplayName =
+                $DisplayName
+
+            ObjectType =
+                $ObjectType
+
+            ObjectId =
+                $ObjectId
+
+            UserPrincipalName =
+                $UserPrincipalName
+
+            AppId =
+                $AppId
+
+
+            SubscriptionName =
+                $SubscriptionName
+
+            SubscriptionId =
+                $SubscriptionId
+
+
+            RoleName =
+                $RoleName
+
+            RoleDefinitionId =
+                $RoleDefinitionId
+
+            RoleDescription =
+                $RoleDescription
+
+
+            AssignmentId =
+                $AssignmentId
+
+            AssignmentObjectType =
+                $AssignmentObjectType
+
+            AssignmentType =
+                $AssignmentType
+
+            AssignmentStatus =
+                $AssignmentStatus
+
+
+            Scope =
+                $Scope
+
+            ScopeType =
+                $ScopeType
+
+            ScopeName =
+                $ScopeName
+
+
+            Inherited =
+                $Inherited
+
+            AssignmentSource =
+                $AssignmentSource
+
+
+            StartDateTime =
+                $StartDateTime
+
+            EndDateTime =
+                $EndDateTime
+
+
+            ManagementGroupName =
+                $ManagementGroupName
+
+            ManagementGroupDisplayName =
+                $ManagementGroupDisplayName
+
+
+            Status =
+                $Status
+        }
+}
+
+
+# ============================================================
+# FUNCTION
+#
+# GET ROLE DEFINITION
+#
+# ============================================================
+
+function Get-CachedRoleDefinition {
+
+    param(
+
+        [Parameter(Mandatory = $true)]
+        [string]
+        $RoleDefinitionId
+    )
+
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $RoleDefinitionId
+        )
+    ) {
+
+        return $null
+    }
+
+
+    $Key =
+        $RoleDefinitionId.ToLower()
+
+
+    if (
+        $RoleDefinitionCache.ContainsKey($Key)
+    ) {
+
+        return $RoleDefinitionCache[$Key]
+    }
+
+
+    try {
+
+        $RoleDefinition =
+            Get-AzRoleDefinition `
+                -Id $RoleDefinitionId `
+                -ErrorAction Stop
+
+
+        $RoleDefinitionCache[$Key] =
+            $RoleDefinition
+
+
+        return $RoleDefinition
+    }
+    catch {
+
+        $RoleDefinitionCache[$Key] =
+            $null
+
+
+        return $null
+    }
+}
+
+
+# ============================================================
+# FUNCTION
+#
+# DETERMINE SCOPE TYPE
+#
+# ============================================================
+
+function Get-ScopeInformation {
+
+    param(
+
+        [string]$Scope,
+
+        [string]$SubscriptionName
+    )
+
+
+    if ([string]::IsNullOrWhiteSpace($Scope)) {
+
+        return [PSCustomObject]@{
+
+            ScopeType = ""
+
+            ScopeName = ""
+        }
+    }
+
+
+    # --------------------------------------------------------
+    # MANAGEMENT GROUP
+    # --------------------------------------------------------
+
+    if (
+        $Scope -match `
+        "^/providers/Microsoft\.Management/managementGroups/"
+    ) {
+
+        return [PSCustomObject]@{
+
+            ScopeType =
+                "Management Group"
+
+            ScopeName =
+                ($Scope -split "/")[-1]
+        }
+    }
+
+
+    # --------------------------------------------------------
+    # SUBSCRIPTION
+    # --------------------------------------------------------
+
+    if (
+        $Scope -match `
+        "^/subscriptions/[^/]+$"
+    ) {
+
+        return [PSCustomObject]@{
+
+            ScopeType =
+                "Subscription"
+
+            ScopeName =
+                $SubscriptionName
+        }
+    }
+
+
+    # --------------------------------------------------------
+    # RESOURCE GROUP
+    # --------------------------------------------------------
+
+    if (
+        $Scope -match `
+        "^/subscriptions/[^/]+/resourceGroups/([^/]+)$"
+    ) {
+
+        return [PSCustomObject]@{
+
+            ScopeType =
+                "Resource Group"
+
+            ScopeName =
+                $Matches[1]
+        }
+    }
+
+
+    # --------------------------------------------------------
+    # RESOURCE
+    # --------------------------------------------------------
+
+    if (
+        $Scope -match "/providers/"
+    ) {
+
+        return [PSCustomObject]@{
+
+            ScopeType =
+                "Resource"
+
+            ScopeName =
+                ($Scope -split "/")[-1]
+        }
+    }
+
+
+    return [PSCustomObject]@{
+
+        ScopeType =
+            "Other"
+
+        ScopeName =
+            $Scope
+    }
+}
+
+
+# ============================================================
+# GET MANAGEMENT GROUPS
+# ============================================================
+
+Write-Host ""
+Write-Host "========================================================" `
+    -ForegroundColor Cyan
+
+Write-Host "Building Management Group hierarchy..." `
+    -ForegroundColor Cyan
+
+Write-Host "========================================================" `
+    -ForegroundColor Cyan
+
+
+$ManagementGroups = @()
+
+
+try {
+
+    $ManagementGroups = @(
+        Get-AzManagementGroup `
+            -ErrorAction Stop
+    )
+
+
+    Write-Host `
+        "Management Groups discovered: $($ManagementGroups.Count)" `
+        -ForegroundColor Green
+}
+catch {
+
+    Write-Warning `
+        "Unable to retrieve Management Groups: $($_.Exception.Message)"
+
+    Write-Warning `
+        "Management Group checks will be skipped."
+}
+
+
+# ============================================================
+# MANAGEMENT GROUP LOOKUP
+# ============================================================
+
+$ManagementGroupLookup = @{}
+
+
+foreach ($ManagementGroup in $ManagementGroups) {
+
+    if (
+        -not [string]::IsNullOrWhiteSpace(
+            $ManagementGroup.Id
+        )
+    ) {
+
+        $ManagementGroupLookup[
+            $ManagementGroup.Id.ToLower()
+        ] =
+            $ManagementGroup
+    }
+}
+
+
+# ============================================================
+# FUNCTION
+#
+# GET MANAGEMENT GROUPS FOR SUBSCRIPTION
+#
+# ============================================================
+
+function Get-ManagementGroupsForSubscription {
+
+    param(
+
+        [Parameter(Mandatory = $true)]
+        [string]
+        $SubscriptionId
+    )
+
+
+    $CacheKey =
+        $SubscriptionId.ToLower()
+
+
+    if (
+        $SubscriptionManagementGroupCache.ContainsKey(
+            $CacheKey
+        )
+    ) {
+
+        return @(
+            $SubscriptionManagementGroupCache[$CacheKey]
+        )
+    }
+
+
+    $Result = @()
+
+    $CurrentManagementGroup = $null
+
+
+    # --------------------------------------------------------
+    # FIND DIRECT MANAGEMENT GROUP
+    # --------------------------------------------------------
+
+    foreach ($ManagementGroup in $ManagementGroups) {
+
+        try {
+
+            $Membership =
+                Get-AzManagementGroupSubscription `
+                    -GroupName $ManagementGroup.Name `
+                    -SubscriptionId $SubscriptionId `
+                    -ErrorAction Stop
+
+
+            if ($null -ne $Membership) {
+
+                $CurrentManagementGroup =
+                    $ManagementGroup
+
+                break
+            }
+        }
+        catch {
+
+            continue
+        }
+    }
+
+
+    # --------------------------------------------------------
+    # NO MANAGEMENT GROUP
+    # --------------------------------------------------------
+
+    if ($null -eq $CurrentManagementGroup) {
+
+        $SubscriptionManagementGroupCache[
+            $CacheKey
+        ] = @()
+
+
+        return @()
+    }
+
+
+    # --------------------------------------------------------
+    # WALK UP HIERARCHY
+    # --------------------------------------------------------
+
+    $Visited = @{}
+
+
+    while ($null -ne $CurrentManagementGroup) {
+
+        $CurrentId =
+            $CurrentManagementGroup.Id.ToLower()
+
+
+        if (
+            $Visited.ContainsKey($CurrentId)
+        ) {
+
+            break
+        }
+
+
+        $Visited[$CurrentId] =
+            $true
+
+
+        $Result +=
+            $CurrentManagementGroup
+
+
+        $ParentId =
+            $CurrentManagementGroup.ParentId
+
+
+        if (
+            [string]::IsNullOrWhiteSpace($ParentId)
+        ) {
+
+            break
+        }
+
+
+        if (
+            $ParentId -notmatch `
+            "^/providers/Microsoft\.Management/managementGroups/"
+        ) {
+
+            break
+        }
+
+
+        $ParentKey =
+            $ParentId.ToLower()
+
+
+        if (
+            $ManagementGroupLookup.ContainsKey(
+                $ParentKey
+            )
+        ) {
+
+            $CurrentManagementGroup =
+                $ManagementGroupLookup[$ParentKey]
+        }
+        else {
+
+            try {
+
+                $ParentName =
+                    ($ParentId -split "/")[-1]
+
+
+                $CurrentManagementGroup =
+                    Get-AzManagementGroup `
+                        -GroupName $ParentName `
+                        -ErrorAction Stop
+            }
+            catch {
+
+                break
+            }
+        }
+    }
+
+
+    $SubscriptionManagementGroupCache[
+        $CacheKey
+    ] =
+        @($Result)
+
+
+    return @($Result)
+}
+
+
+# ============================================================
+# PROCESS EACH INPUT ROW
+# ============================================================
+
+foreach ($Row in $InputRows) {
+
+    # ========================================================
+    # READ INPUT VALUES
+    # ========================================================
+
+    $InputSubscription =
+        [string]$Row.subscription
+
+
+    $InputSubscription =
+        $InputSubscription.Trim()
+
+
+    $SubscriptionId =
+        [string]$Row.subscriptionid
+
+
+    $SubscriptionId =
+        $SubscriptionId.Trim()
+
+
+    $DisplayName =
+        [string]$Row."user/group/serviceprinciple"
+
+
+    $DisplayName =
+        $DisplayName.Trim()
+
+
+    # ========================================================
+    # DEBUG
+    # ========================================================
+
+    Write-Host ""
+    Write-Host "========================================================" `
+        -ForegroundColor Cyan
+
+    Write-Host "INPUT ROW" `
+        -ForegroundColor Cyan
+
+    Write-Host "Subscription : [$InputSubscription]" `
+        -ForegroundColor Yellow
+
+    Write-Host "SubscriptionId: [$SubscriptionId]" `
+        -ForegroundColor Yellow
+
+    Write-Host "Object       : [$DisplayName]" `
+        -ForegroundColor Yellow
+
+    Write-Host "========================================================" `
+        -ForegroundColor Cyan
+
+
+    # ========================================================
+    # VALIDATE INPUT
+    # ========================================================
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $InputSubscription
+        )
+    ) {
+
+        Write-Warning `
+            "Subscription name is empty. Skipping row."
+
+        continue
+    }
+
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $SubscriptionId
+        )
+    ) {
+
+        Write-Warning `
+            "SubscriptionId is empty. Skipping row."
+
+        continue
+    }
+
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $DisplayName
+        )
+    ) {
+
+        Write-Warning `
+            "Object name is empty. Skipping row."
+
+        continue
+    }
+
+
+    # ========================================================
+    # DUPLICATE OBJECT
+    # ========================================================
+
+    $ObjectKey =
+        $DisplayName.ToLower()
+
+
+    $DuplicateObject =
+        "NO"
+
+
+    if (
+        $ObjectOccurrenceMap.ContainsKey(
+            $ObjectKey
+        ) -and
+
+        $ObjectOccurrenceMap[$ObjectKey] -gt 1
+    ) {
+
+        $DuplicateObject =
+            "YES"
+    }
+
+
+    # ========================================================
+    # FIND USERS
+    # ========================================================
+
+    Write-Host ""
+    Write-Host `
+        "Searching User: $DisplayName" `
+        -ForegroundColor DarkCyan
+
+
+    $Users = @(
+        Get-AzADUser `
+            -DisplayName $DisplayName `
+            -ErrorAction SilentlyContinue
+    )
+
+
+    # ========================================================
+    # FIND GROUPS
+    # ========================================================
+
+    Write-Host `
+        "Searching Group: $DisplayName" `
+        -ForegroundColor DarkCyan
+
+
+    $Groups = @(
+        Get-AzADGroup `
+            -DisplayName $DisplayName `
+            -ErrorAction SilentlyContinue
+    )
+
+
+    # ========================================================
+    # FIND SERVICE PRINCIPALS
+    # ========================================================
+
+    Write-Host `
+        "Searching Service Principal: $DisplayName" `
+        -ForegroundColor DarkCyan
+
+
+    $ServicePrincipals = @(
+        Get-AzADServicePrincipal `
+            -DisplayName $DisplayName `
+            -ErrorAction SilentlyContinue
+    )
+
+
+    # ========================================================
+    # COMBINE OBJECTS
+    # ========================================================
+
+    $MatchedObjects = @()
+
+
+    # --------------------------------------------------------
+    # USERS
+    # --------------------------------------------------------
+
+    foreach ($User in $Users) {
+
+        $MatchedObjects +=
+            [PSCustomObject]@{
+
+                ObjectType =
+                    "User"
+
+                DisplayName =
+                    $User.DisplayName
+
+                ObjectId =
+                    $User.Id
+
+                UserPrincipalName =
+                    $User.UserPrincipalName
+
+                AppId =
+                    ""
+            }
+    }
+
+
+    # --------------------------------------------------------
+    # GROUPS
+    # --------------------------------------------------------
+
+    foreach ($Group in $Groups) {
+
+        $MatchedObjects +=
+            [PSCustomObject]@{
+
+                ObjectType =
+                    "Group"
+
+                DisplayName =
+                    $Group.DisplayName
+
+                ObjectId =
+                    $Group.Id
+
+                UserPrincipalName =
+                    ""
+
+                AppId =
+                    ""
+            }
+    }
+
+
+    # --------------------------------------------------------
+    # SERVICE PRINCIPALS
+    # --------------------------------------------------------
+
+    foreach ($ServicePrincipal in $ServicePrincipals) {
+
+        $MatchedObjects +=
+            [PSCustomObject]@{
+
+                ObjectType =
+                    "ServicePrincipal"
+
+                DisplayName =
+                    $ServicePrincipal.DisplayName
+
+                ObjectId =
+                    $ServicePrincipal.Id
+
+                UserPrincipalName =
+                    ""
+
+                AppId =
+                    $ServicePrincipal.AppId
+            }
+    }
+
+
+    # ========================================================
+    # OBJECT NOT FOUND
+    # ========================================================
+
+    if ($MatchedObjects.Count -eq 0) {
+
+        Write-Warning `
+            "Object not found: $DisplayName"
+
+
+        Add-Result `
+            -InputSubscription $InputSubscription `
+            -DuplicateObject $DuplicateObject `
+            -ObjectName $DisplayName `
+            -DisplayName $DisplayName `
+            -ObjectType "Not Found" `
+            -ObjectId "" `
+            -UserPrincipalName "" `
+            -AppId "" `
+            -SubscriptionName "" `
+            -SubscriptionId $SubscriptionId `
+            -RoleName "" `
+            -RoleDefinitionId "" `
+            -RoleDescription "" `
+            -AssignmentId "" `
+            -AssignmentObjectType "" `
+            -AssignmentType "" `
+            -AssignmentStatus "" `
+            -Scope "" `
+            -ScopeType "" `
+            -ScopeName "" `
+            -Inherited "" `
+            -AssignmentSource "" `
+            -StartDateTime "" `
+            -EndDateTime "" `
+            -ManagementGroupName "" `
+            -ManagementGroupDisplayName "" `
+            -Status "OBJECT NOT FOUND"
+
+
+        continue
+    }
+
+
+    # ========================================================
+    # MULTIPLE OBJECTS FOUND
+    # ========================================================
+
+    if ($MatchedObjects.Count -gt 1) {
+
+        Write-Warning `
+            "Multiple objects found for: $DisplayName"
+
+
+        foreach ($Object in $MatchedObjects) {
+
+            Write-Host `
+                "  $($Object.ObjectType) - $($Object.ObjectId)" `
+                -ForegroundColor Yellow
+
+
+            Add-Result `
+                -InputSubscription $InputSubscription `
+                -DuplicateObject $DuplicateObject `
+                -ObjectName $DisplayName `
+                -DisplayName $Object.DisplayName `
+                -ObjectType $Object.ObjectType `
+                -ObjectId $Object.ObjectId `
+                -UserPrincipalName $Object.UserPrincipalName `
+                -AppId $Object.AppId `
+                -SubscriptionName "" `
+                -SubscriptionId $SubscriptionId `
+                -RoleName "" `
+                -RoleDefinitionId "" `
+                -RoleDescription "" `
+                -AssignmentId "" `
+                -AssignmentObjectType "" `
+                -AssignmentType "" `
+                -AssignmentStatus "" `
+                -Scope "" `
+                -ScopeType "" `
+                -ScopeName "" `
+                -Inherited "" `
+                -AssignmentSource "" `
+                -StartDateTime "" `
+                -EndDateTime "" `
+                -ManagementGroupName "" `
+                -ManagementGroupDisplayName "" `
+                -Status "MULTIPLE OBJECTS FOUND"
+        }
+
+
+        continue
+    }
+
+
+    # ========================================================
+    # SINGLE OBJECT
+    # ========================================================
+
+    $Object =
+        $MatchedObjects[0]
+
+
+    Write-Host ""
+    Write-Host `
+        "OBJECT FOUND" `
+        -ForegroundColor Green
+
+    Write-Host `
+        "Type       : $($Object.ObjectType)" `
+        -ForegroundColor Green
+
+    Write-Host `
+        "DisplayName: $($Object.DisplayName)" `
+        -ForegroundColor Green
+
+    Write-Host `
+        "ObjectId   : $($Object.ObjectId)" `
+        -ForegroundColor Green
+
+
+    # ========================================================
+    # SET SUBSCRIPTION CONTEXT
+    # ========================================================
+
+    Write-Host ""
+    Write-Host `
+        "Setting Azure subscription context..." `
+        -ForegroundColor Yellow
+
+
+    try {
+
+        Set-AzContext `
+            -SubscriptionId $SubscriptionId `
+            -ErrorAction Stop |
+            Out-Null
+
+
+        $Context =
+            Get-AzContext
+
+
+        $SubscriptionName =
+            $Context.Subscription.Name
+
+
+        Write-Host `
+            "Context set successfully: $SubscriptionName" `
+            -ForegroundColor Green
+    }
+    catch {
+
+        Write-Warning `
+            "Unable to set subscription context: $SubscriptionId"
+
+        Write-Warning `
+            $_.Exception.Message
+
+
+        Add-Result `
+            -InputSubscription $InputSubscription `
+            -DuplicateObject $DuplicateObject `
+            -ObjectName $DisplayName `
+            -DisplayName $Object.DisplayName `
+            -ObjectType $Object.ObjectType `
+            -ObjectId $Object.ObjectId `
+            -UserPrincipalName $Object.UserPrincipalName `
+            -AppId $Object.AppId `
+            -SubscriptionName "" `
+            -SubscriptionId $SubscriptionId `
+            -RoleName "" `
+            -RoleDefinitionId "" `
+            -RoleDescription "" `
+            -AssignmentId "" `
+            -AssignmentObjectType "" `
+            -AssignmentType "" `
+            -AssignmentStatus "" `
+            -Scope "" `
+            -ScopeType "" `
+            -ScopeName "" `
+            -Inherited "" `
+            -AssignmentSource "" `
+            -StartDateTime "" `
+            -EndDateTime "" `
+            -ManagementGroupName "" `
+            -ManagementGroupDisplayName "" `
+            -Status "ERROR SETTING SUBSCRIPTION CONTEXT: $($_.Exception.Message)"
+
+
+        continue
+    }
+
+
+    # ========================================================
+    # TRACK ASSIGNMENTS
+    # ========================================================
+
+    $FoundAssignment =
+        $false
+
+
+    # ========================================================
+    # SUBSCRIPTION SCOPE
+    # ========================================================
+
+    $SubscriptionScope =
+        "/subscriptions/$SubscriptionId"
+
+
+    # ========================================================
+    # 1. NORMAL RBAC
+    # ========================================================
+
+    Write-Host ""
+    Write-Host `
+        "--------------------------------------------------------" `
+        -ForegroundColor DarkGray
+
+    Write-Host `
+        "CHECKING NORMAL / PERMANENT RBAC" `
+        -ForegroundColor Yellow
+
+    Write-Host `
+        "--------------------------------------------------------" `
+        -ForegroundColor DarkGray
+
+
+    try {
+
+        $NormalAssignments = @(
+            Get-AzRoleAssignment `
+                -ObjectId $Object.ObjectId `
+                -ErrorAction Stop |
+            Where-Object {
+
+                $_.Scope -like `
+                    "$SubscriptionScope*"
+            }
+        )
+
+
+        $NormalAssignments =
+            @(
+                $NormalAssignments |
+                Sort-Object RoleAssignmentId -Unique
+            )
+
+
+        Write-Host `
+            "Normal assignments found: $($NormalAssignments.Count)" `
+            -ForegroundColor Cyan
+
+
+        foreach ($Assignment in $NormalAssignments) {
+
+            $FoundAssignment =
+                $true
+
+
+            Write-Host `
+                "  NORMAL RBAC: $($Assignment.RoleDefinitionName)" `
+                -ForegroundColor Green
+
+
+            $RoleDefinition =
+                Get-CachedRoleDefinition `
+                    -RoleDefinitionId `
+                    $Assignment.RoleDefinitionId
+
+
+            $RoleDescription = ""
+
+
+            if ($null -ne $RoleDefinition) {
+
+                $RoleDescription =
+                    $RoleDefinition.Description
+            }
+
+
+            $ScopeInfo =
+                Get-ScopeInformation `
+                    -Scope $Assignment.Scope `
+                    -SubscriptionName $SubscriptionName
+
+
+            Add-Result `
+                -InputSubscription $InputSubscription `
+                -DuplicateObject $DuplicateObject `
+                -ObjectName $DisplayName `
+                -DisplayName $Object.DisplayName `
+                -ObjectType $Object.ObjectType `
+                -ObjectId $Object.ObjectId `
+                -UserPrincipalName $Object.UserPrincipalName `
+                -AppId $Object.AppId `
+                -SubscriptionName $SubscriptionName `
+                -SubscriptionId $SubscriptionId `
+                -RoleName $Assignment.RoleDefinitionName `
+                -RoleDefinitionId $Assignment.RoleDefinitionId `
+                -RoleDescription $RoleDescription `
+                -AssignmentId $Assignment.RoleAssignmentId `
+                -AssignmentObjectType $Assignment.ObjectType `
+                -AssignmentType "Normal / Permanent" `
+                -AssignmentStatus "Active" `
+                -Scope $Assignment.Scope `
+                -ScopeType $ScopeInfo.ScopeType `
+                -ScopeName $ScopeInfo.ScopeName `
+                -Inherited "No" `
+                -AssignmentSource $ScopeInfo.ScopeType `
+                -StartDateTime "" `
+                -EndDateTime "" `
+                -ManagementGroupName "" `
+                -ManagementGroupDisplayName "" `
+                -Status "SUCCESS - NORMAL RBAC"
+        }
+    }
+    catch {
+
+        Write-Warning `
+            "Normal RBAC query failed: $($_.Exception.Message)"
+    }
+
+
+    # ========================================================
+    # 2. PIM ELIGIBLE
+    # ========================================================
+
+    Write-Host ""
+    Write-Host `
+        "--------------------------------------------------------" `
+        -ForegroundColor DarkGray
+
+    Write-Host `
+        "CHECKING PIM ELIGIBLE RBAC" `
+        -ForegroundColor Magenta
+
+    Write-Host `
+        "--------------------------------------------------------" `
+        -ForegroundColor DarkGray
+
+
+    try {
+
+        $EligibleAssignments = @(
+            Get-AzRoleEligibilitySchedule `
+                -Scope $SubscriptionScope `
+                -Filter "principalId eq '$($Object.ObjectId)'" `
+                -ErrorAction Stop
+        )
+
+
+        $EligibleAssignments =
+            @(
+                $EligibleAssignments |
+                Where-Object {
+
+                    $_.Scope -like `
+                        "$SubscriptionScope*"
+                }
+            )
+
+
+        $EligibleAssignments =
+            @(
+                $EligibleAssignments |
+                Sort-Object Id -Unique
+            )
+
+
+        Write-Host `
+            "PIM eligible assignments found: $($EligibleAssignments.Count)" `
+            -ForegroundColor Cyan
+
+
+        foreach ($Assignment in $EligibleAssignments) {
+
+            $FoundAssignment =
+                $true
+
+
+            $RoleDefinitionId =
+                $Assignment.RoleDefinitionId
+
+
+            $RoleDefinition =
+                Get-CachedRoleDefinition `
+                    -RoleDefinitionId `
+                    $RoleDefinitionId
+
+
+            $RoleName =
+                $Assignment.RoleDefinitionDisplayName
+
+
+            if (
+                [string]::IsNullOrWhiteSpace($RoleName)
+            ) {
+
+                if ($null -ne $RoleDefinition) {
+
+                    $RoleName =
+                        $RoleDefinition.Name
+                }
+            }
+
+
+            $RoleDescription = ""
+
+
+            if ($null -ne $RoleDefinition) {
+
+                $RoleDescription =
+                    $RoleDefinition.Description
+            }
+
+
+            $AssignmentId =
+                $Assignment.Name
+
+
+            if (
+                [string]::IsNullOrWhiteSpace($AssignmentId)
+            ) {
+
+                $AssignmentId =
+                    $Assignment.Id
+            }
+
+
+            Write-Host `
+                "  PIM ELIGIBLE: $RoleName" `
+                -ForegroundColor Green
+
+
+            $ScopeInfo =
+                Get-ScopeInformation `
+                    -Scope $Assignment.Scope `
+                    -SubscriptionName $SubscriptionName
+
+
+            Add-Result `
+                -InputSubscription $InputSubscription `
+                -DuplicateObject $DuplicateObject `
+                -ObjectName $DisplayName `
+                -DisplayName $Object.DisplayName `
+                -ObjectType $Object.ObjectType `
+                -ObjectId $Object.ObjectId `
+                -UserPrincipalName $Object.UserPrincipalName `
+                -AppId $Object.AppId `
+                -SubscriptionName $SubscriptionName `
+                -SubscriptionId $SubscriptionId `
+                -RoleName $RoleName `
+                -RoleDefinitionId $RoleDefinitionId `
+                -RoleDescription $RoleDescription `
+                -AssignmentId $AssignmentId `
+                -AssignmentObjectType $Object.ObjectType `
+                -AssignmentType "PIM Eligible" `
+                -AssignmentStatus "Eligible" `
+                -Scope $Assignment.Scope `
+                -ScopeType $ScopeInfo.ScopeType `
+                -ScopeName $ScopeInfo.ScopeName `
+                -Inherited "No" `
+                -AssignmentSource "PIM" `
+                -StartDateTime ([string]$Assignment.StartDateTime) `
+                -EndDateTime ([string]$Assignment.EndDateTime) `
+                -ManagementGroupName "" `
+                -ManagementGroupDisplayName "" `
+                -Status "SUCCESS - PIM ELIGIBLE"
+        }
+    }
+    catch {
+
+        Write-Warning `
+            "PIM Eligible query failed: $($_.Exception.Message)"
+    }
+
+
+    # ========================================================
+    # 3. PIM ACTIVE / TIME-BOUND
+    # ========================================================
+
+    Write-Host ""
+    Write-Host `
+        "--------------------------------------------------------" `
+        -ForegroundColor DarkGray
+
+    Write-Host `
+        "CHECKING PIM ACTIVE / TIME-BOUND RBAC" `
+        -ForegroundColor Magenta
+
+    Write-Host `
+        "--------------------------------------------------------" `
+        -ForegroundColor DarkGray
+
+
+    try {
+
+        $ActivePIMAssignments = @(
+            Get-AzRoleAssignmentSchedule `
+                -Scope $SubscriptionScope `
+                -Filter "principalId eq '$($Object.ObjectId)'" `
+                -ErrorAction Stop |
+            Where-Object {
+
+                $_.Scope -like `
+                    "$SubscriptionScope*" -and
+
+                $null -ne $_.EndDateTime
+            }
+        )
+
+
+        $ActivePIMAssignments =
+            @(
+                $ActivePIMAssignments |
+                Sort-Object Id -Unique
+            )
+
+
+        Write-Host `
+            "PIM active assignments found: $($ActivePIMAssignments.Count)" `
+            -ForegroundColor Cyan
+
+
+        foreach ($Assignment in $ActivePIMAssignments) {
+
+            $FoundAssignment =
+                $true
+
+
+            $RoleDefinitionId =
+                $Assignment.RoleDefinitionId
+
+
+            $RoleDefinition =
+                Get-CachedRoleDefinition `
+                    -RoleDefinitionId `
+                    $RoleDefinitionId
+
+
+            $RoleName =
+                $Assignment.RoleDefinitionDisplayName
+
+
+            if (
+                [string]::IsNullOrWhiteSpace($RoleName)
+            ) {
+
+                if ($null -ne $RoleDefinition) {
+
+                    $RoleName =
+                        $RoleDefinition.Name
+                }
+            }
+
+
+            $RoleDescription = ""
+
+
+            if ($null -ne $RoleDefinition) {
+
+                $RoleDescription =
+                    $RoleDefinition.Description
+            }
+
+
+            $AssignmentId =
+                $Assignment.Name
+
+
+            if (
+                [string]::IsNullOrWhiteSpace($AssignmentId)
+            ) {
+
+                $AssignmentId =
+                    $Assignment.Id
+            }
+
+
+            Write-Host `
+                "  PIM ACTIVE: $RoleName" `
+                -ForegroundColor Green
+
+
+            $ScopeInfo =
+                Get-ScopeInformation `
+                    -Scope $Assignment.Scope `
+                    -SubscriptionName $SubscriptionName
+
+
+            Add-Result `
+                -InputSubscription $InputSubscription `
+                -DuplicateObject $DuplicateObject `
+                -ObjectName $DisplayName `
+                -DisplayName $Object.DisplayName `
+                -ObjectType $Object.ObjectType `
+                -ObjectId $Object.ObjectId `
+                -UserPrincipalName $Object.UserPrincipalName `
+                -AppId $Object.AppId `
+                -SubscriptionName $SubscriptionName `
+                -SubscriptionId $SubscriptionId `
+                -RoleName $RoleName `
+                -RoleDefinitionId $RoleDefinitionId `
+                -RoleDescription $RoleDescription `
+                -AssignmentId $AssignmentId `
+                -AssignmentObjectType $Object.ObjectType `
+                -AssignmentType "PIM Active / Time-Bound" `
+                -AssignmentStatus "Active" `
+                -Scope $Assignment.Scope `
+                -ScopeType $ScopeInfo.ScopeType `
+                -ScopeName $ScopeInfo.ScopeName `
+                -Inherited "No" `
+                -AssignmentSource "PIM" `
+                -StartDateTime ([string]$Assignment.StartDateTime) `
+                -EndDateTime ([string]$Assignment.EndDateTime) `
+                -ManagementGroupName "" `
+                -ManagementGroupDisplayName "" `
+                -Status "SUCCESS - PIM ACTIVE"
+        }
+    }
+    catch {
+
+        Write-Warning `
+            "PIM Active query failed: $($_.Exception.Message)"
+    }
+
+
+    # ========================================================
+    # 4. GET MANAGEMENT GROUP HIERARCHY
+    # ========================================================
+
+    Write-Host ""
+    Write-Host `
+        "--------------------------------------------------------" `
+        -ForegroundColor DarkGray
+
+    Write-Host `
+        "CHECKING MANAGEMENT GROUP HIERARCHY" `
+        -ForegroundColor DarkMagenta
+
+    Write-Host `
+        "--------------------------------------------------------" `
+        -ForegroundColor DarkGray
+
+
+    $SubscriptionManagementGroups =
+        @(
+            Get-ManagementGroupsForSubscription `
+                -SubscriptionId $SubscriptionId
+        )
+
+
+    Write-Host `
+        "Management Groups found: $($SubscriptionManagementGroups.Count)" `
+        -ForegroundColor Cyan
+
+
+    # ========================================================
+    # PROCESS MANAGEMENT GROUPS
+    # ========================================================
+
+    foreach (
+        $ManagementGroup
+        in $SubscriptionManagementGroups
+    ) {
+
+        Write-Host ""
+        Write-Host `
+            "Management Group: $($ManagementGroup.DisplayName)" `
+            -ForegroundColor DarkMagenta
+
+
+        $ManagementGroupScope =
+            $ManagementGroup.Id
+
+
+        # ====================================================
+        # 5. MANAGEMENT GROUP NORMAL RBAC
+        # ====================================================
+
+        Write-Host `
+            "  Checking MG Normal RBAC..." `
+            -ForegroundColor Yellow
+
+
+        try {
+
+            $MGNormalAssignments = @(
+                Get-AzRoleAssignment `
+                    -Scope $ManagementGroupScope `
+                    -ErrorAction Stop |
+                Where-Object {
+
+                    $_.ObjectId -eq `
+                        $Object.ObjectId
+                }
+            )
+
+
+            $MGNormalAssignments =
+                @(
+                    $MGNormalAssignments |
+                    Sort-Object RoleAssignmentId -Unique
+                )
+
+
+            Write-Host `
+                "  MG normal assignments: $($MGNormalAssignments.Count)" `
+                -ForegroundColor Cyan
+
+
+            foreach ($Assignment in $MGNormalAssignments) {
+
+                $FoundAssignment =
+                    $true
+
+
+                Write-Host `
+                    "    MG NORMAL: $($Assignment.RoleDefinitionName)" `
+                    -ForegroundColor Green
+
+
+                $RoleDefinition =
+                    Get-CachedRoleDefinition `
+                        -RoleDefinitionId `
+                        $Assignment.RoleDefinitionId
+
+
+                $RoleDescription = ""
+
+
+                if ($null -ne $RoleDefinition) {
+
+                    $RoleDescription =
+                        $RoleDefinition.Description
+                }
+
+
+                Add-Result `
+                    -InputSubscription $InputSubscription `
+                    -DuplicateObject $DuplicateObject `
+                    -ObjectName $DisplayName `
+                    -DisplayName $Object.DisplayName `
+                    -ObjectType $Object.ObjectType `
+                    -ObjectId $Object.ObjectId `
+                    -UserPrincipalName $Object.UserPrincipalName `
+                    -AppId $Object.AppId `
+                    -SubscriptionName $SubscriptionName `
+                    -SubscriptionId $SubscriptionId `
+                    -RoleName $Assignment.RoleDefinitionName `
+                    -RoleDefinitionId $Assignment.RoleDefinitionId `
+                    -RoleDescription $RoleDescription `
+                    -AssignmentId $Assignment.RoleAssignmentId `
+                    -AssignmentObjectType $Assignment.ObjectType `
+                    -AssignmentType "Management Group - Normal / Permanent" `
+                    -AssignmentStatus "Active" `
+                    -Scope $Assignment.Scope `
+                    -ScopeType "Management Group" `
+                    -ScopeName $ManagementGroup.DisplayName `
+                    -Inherited "Yes" `
+                    -AssignmentSource "Management Group" `
+                    -StartDateTime "" `
+                    -EndDateTime "" `
+                    -ManagementGroupName $ManagementGroup.Name `
+                    -ManagementGroupDisplayName $ManagementGroup.DisplayName `
+                    -Status "SUCCESS - MG NORMAL RBAC"
+            }
+        }
+        catch {
+
+            Write-Warning `
+                "  MG Normal RBAC failed: $($_.Exception.Message)"
+        }
+
+
+        # ====================================================
+        # 6. MANAGEMENT GROUP PIM ELIGIBLE
+        # ====================================================
+
+        Write-Host `
+            "  Checking MG PIM Eligible..." `
+            -ForegroundColor Magenta
+
+
+        try {
+
+            $MGEligibleAssignments = @(
+                Get-AzRoleEligibilitySchedule `
+                    -Scope $ManagementGroupScope `
+                    -Filter "principalId eq '$($Object.ObjectId)'" `
+                    -ErrorAction Stop |
+                Where-Object {
+
+                    $_.Scope -eq `
+                        $ManagementGroupScope
+                }
+            )
+
+
+            $MGEligibleAssignments =
+                @(
+                    $MGEligibleAssignments |
+                    Sort-Object Id -Unique
+                )
+
+
+            Write-Host `
+                "  MG PIM eligible assignments: $($MGEligibleAssignments.Count)" `
+                -ForegroundColor Cyan
+
+
+            foreach ($Assignment in $MGEligibleAssignments) {
+
+                $FoundAssignment =
+                    $true
+
+
+                $RoleDefinitionId =
+                    $Assignment.RoleDefinitionId
+
+
+                $RoleDefinition =
+                    Get-CachedRoleDefinition `
+                        -RoleDefinitionId `
+                        $RoleDefinitionId
+
+
+                $RoleName =
+                    $Assignment.RoleDefinitionDisplayName
+
+
+                if (
+                    [string]::IsNullOrWhiteSpace($RoleName)
+                ) {
+
+                    if ($null -ne $RoleDefinition) {
+
+                        $RoleName =
+                            $RoleDefinition.Name
+                    }
+                }
+
+
+                $RoleDescription = ""
+
+
+                if ($null -ne $RoleDefinition) {
+
+                    $RoleDescription =
+                        $RoleDefinition.Description
+                }
+
+
+                $AssignmentId =
+                    $Assignment.Name
+
+
+                if (
+                    [string]::IsNullOrWhiteSpace($AssignmentId)
+                ) {
+
+                    $AssignmentId =
+                        $Assignment.Id
+                }
+
+
+                Write-Host `
+                    "    MG PIM ELIGIBLE: $RoleName" `
+                    -ForegroundColor Green
+
+
+                Add-Result `
+                    -InputSubscription $InputSubscription `
+                    -DuplicateObject $DuplicateObject `
+                    -ObjectName $DisplayName `
+                    -DisplayName $Object.DisplayName `
+                    -ObjectType $Object.ObjectType `
+                    -ObjectId $Object.ObjectId `
+                    -UserPrincipalName $Object.UserPrincipalName `
+                    -AppId $Object.AppId `
+                    -SubscriptionName $SubscriptionName `
+                    -SubscriptionId $SubscriptionId `
+                    -RoleName $RoleName `
+                    -RoleDefinitionId $RoleDefinitionId `
+                    -RoleDescription $RoleDescription `
+                    -AssignmentId $AssignmentId `
+                    -AssignmentObjectType $Object.ObjectType `
+                    -AssignmentType "Management Group - PIM Eligible" `
+                    -AssignmentStatus "Eligible" `
+                    -Scope $Assignment.Scope `
+                    -ScopeType "Management Group" `
+                    -ScopeName $ManagementGroup.DisplayName `
+                    -Inherited "Yes" `
+                    -AssignmentSource "Management Group PIM" `
+                    -StartDateTime ([string]$Assignment.StartDateTime) `
+                    -EndDateTime ([string]$Assignment.EndDateTime) `
+                    -ManagementGroupName $ManagementGroup.Name `
+                    -ManagementGroupDisplayName $ManagementGroup.DisplayName `
+                    -Status "SUCCESS - MG PIM ELIGIBLE"
+            }
+        }
+        catch {
+
+            Write-Warning `
+                "  MG PIM Eligible failed: $($_.Exception.Message)"
+        }
+
+
+        # ====================================================
+        # 7. MANAGEMENT GROUP PIM ACTIVE
+        # ====================================================
+
+        Write-Host `
+            "  Checking MG PIM Active..." `
+            -ForegroundColor Magenta
+
+
+        try {
+
+            $MGActiveAssignments = @(
+                Get-AzRoleAssignmentSchedule `
+                    -Scope $ManagementGroupScope `
+                    -Filter "principalId eq '$($Object.ObjectId)'" `
+                    -ErrorAction Stop |
+                Where-Object {
+
+                    $_.Scope -eq `
+                        $ManagementGroupScope -and
+
+                    $null -ne $_.EndDateTime
+                }
+            )
+
+
+            $MGActiveAssignments =
+                @(
+                    $MGActiveAssignments |
+                    Sort-Object Id -Unique
+                )
+
+
+            Write-Host `
+                "  MG PIM active assignments: $($MGActiveAssignments.Count)" `
+                -ForegroundColor Cyan
+
+
+            foreach ($Assignment in $MGActiveAssignments) {
+
+                $FoundAssignment =
+                    $true
+
+
+                $RoleDefinitionId =
+                    $Assignment.RoleDefinitionId
+
+
+                $RoleDefinition =
+                    Get-CachedRoleDefinition `
+                        -RoleDefinitionId `
+                        $RoleDefinitionId
+
+
+                $RoleName =
+                    $Assignment.RoleDefinitionDisplayName
+
+
+                if (
+                    [string]::IsNullOrWhiteSpace($RoleName)
+                ) {
+
+                    if ($null -ne $RoleDefinition) {
+
+                        $RoleName =
+                            $RoleDefinition.Name
+                    }
+                }
+
+
+                $RoleDescription = ""
+
+
+                if ($null -ne $RoleDefinition) {
+
+                    $RoleDescription =
+                        $RoleDefinition.Description
+                }
+
+
+                $AssignmentId =
+                    $Assignment.Name
+
+
+                if (
+                    [string]::IsNullOrWhiteSpace($AssignmentId)
+                ) {
+
+                    $AssignmentId =
+                        $Assignment.Id
+                }
+
+
+                Write-Host `
+                    "    MG PIM ACTIVE: $RoleName" `
+                    -ForegroundColor Green
+
+
+                Add-Result `
+                    -InputSubscription $InputSubscription `
+                    -DuplicateObject $DuplicateObject `
+                    -ObjectName $DisplayName `
+                    -DisplayName $Object.DisplayName `
+                    -ObjectType $Object.ObjectType `
+                    -ObjectId $Object.ObjectId `
+                    -UserPrincipalName $Object.UserPrincipalName `
+                    -AppId $Object.AppId `
+                    -SubscriptionName $SubscriptionName `
+                    -SubscriptionId $SubscriptionId `
+                    -RoleName $RoleName `
+                    -RoleDefinitionId $RoleDefinitionId `
+                    -RoleDescription $RoleDescription `
+                    -AssignmentId $AssignmentId `
+                    -AssignmentObjectType $Object.ObjectType `
+                    -AssignmentType "Management Group - PIM Active / Time-Bound" `
+                    -AssignmentStatus "Active" `
+                    -Scope $Assignment.Scope `
+                    -ScopeType "Management Group" `
+                    -ScopeName $ManagementGroup.DisplayName `
+                    -Inherited "Yes" `
+                    -AssignmentSource "Management Group PIM" `
+                    -StartDateTime ([string]$Assignment.StartDateTime) `
+                    -EndDateTime ([string]$Assignment.EndDateTime) `
+                    -ManagementGroupName $ManagementGroup.Name `
+                    -ManagementGroupDisplayName $ManagementGroup.DisplayName `
+                    -Status "SUCCESS - MG PIM ACTIVE"
+            }
+        }
+        catch {
+
+            Write-Warning `
+                "  MG PIM Active failed: $($_.Exception.Message)"
+        }
+    }
+
+
+    # ========================================================
+    # NO ASSIGNMENT FOUND
+    # ========================================================
+
+    if (-not $FoundAssignment) {
+
+        Write-Host ""
+        Write-Host `
+            "NO RBAC / PIM ASSIGNMENT FOUND" `
+            -ForegroundColor Yellow
+
+
+        Add-Result `
+            -InputSubscription $InputSubscription `
+            -DuplicateObject $DuplicateObject `
+            -ObjectName $DisplayName `
+            -DisplayName $Object.DisplayName `
+            -ObjectType $Object.ObjectType `
+            -ObjectId $Object.ObjectId `
+            -UserPrincipalName $Object.UserPrincipalName `
+            -AppId $Object.AppId `
+            -SubscriptionName $SubscriptionName `
+            -SubscriptionId $SubscriptionId `
+            -RoleName "" `
+            -RoleDefinitionId "" `
+            -RoleDescription "" `
+            -AssignmentId "" `
+            -AssignmentObjectType "" `
+            -AssignmentType "" `
+            -AssignmentStatus "" `
+            -Scope "" `
+            -ScopeType "" `
+            -ScopeName "" `
+            -Inherited "" `
+            -AssignmentSource "" `
+            -StartDateTime "" `
+            -EndDateTime "" `
+            -ManagementGroupName "" `
+            -ManagementGroupDisplayName "" `
+            -Status "NO ROLE / PIM ASSIGNMENT"
+    }
+
+
+    # ========================================================
+    # DEBUG RESULT COUNT FOR CURRENT OBJECT
+    # ========================================================
+
+    Write-Host ""
+    Write-Host `
+        "Current total result rows: $($Results.Count)" `
+        -ForegroundColor Cyan
+}
+
+
+# ============================================================
+# REMOVE EXACT DUPLICATE RESULT ROWS
+# ============================================================
+
+Write-Host ""
+Write-Host "========================================================" `
+    -ForegroundColor Cyan
+
+Write-Host "Removing exact duplicate result rows..." `
+    -ForegroundColor Cyan
+
+Write-Host "========================================================" `
+    -ForegroundColor Cyan
+
+
+$Results =
+    @(
+        $Results |
+        Sort-Object `
+            InputSubscription,
+            SubscriptionId,
+            ObjectId,
+            AssignmentType,
+            AssignmentId,
+            Scope |
+        Select-Object `
+            * `
+            -Unique
+    )
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+Write-Host ""
+Write-Host "========================================================" `
+    -ForegroundColor Green
+
+Write-Host "EXPORTING REPORT" `
+    -ForegroundColor Green
+
+Write-Host "========================================================" `
+    -ForegroundColor Green
+
+
+$Results |
+    Export-Csv `
+        -Path $OutputCsv `
+        -NoTypeInformation `
+        -Encoding UTF8
+
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
+$NormalCount =
+    @(
+        $Results |
+        Where-Object {
+            $_.AssignmentType -eq
+                "Normal / Permanent"
+        }
+    ).Count
+
+
+$PIMEligibleCount =
+    @(
+        $Results |
+        Where-Object {
+            $_.AssignmentType -eq
+                "PIM Eligible"
+        }
+    ).Count
+
+
+$PIMActiveCount =
+    @(
+        $Results |
+        Where-Object {
+            $_.AssignmentType -eq
+                "PIM Active / Time-Bound"
+        }
+    ).Count
+
+
+$MGNormalCount =
+    @(
+        $Results |
+        Where-Object {
+            $_.AssignmentType -eq
+                "Management Group - Normal / Permanent"
+        }
+    ).Count
+
+
+$MGEligibleCount =
+    @(
+        $Results |
+        Where-Object {
+            $_.AssignmentType -eq
+                "Management Group - PIM Eligible"
+        }
+    ).Count
+
+
+$MGActiveCount =
+    @(
+        $Results |
+        Where-Object {
+            $_.AssignmentType -eq
+                "Management Group - PIM Active / Time-Bound"
+        }
+    ).Count
+
+
+$NoAssignmentCount =
+    @(
+        $Results |
+        Where-Object {
+            $_.Status -eq
+                "NO ROLE / PIM ASSIGNMENT"
+        }
+    ).Count
+
+
+$NotFoundCount =
+    @(
+        $Results |
+        Where-Object {
+            $_.Status -eq
+                "OBJECT NOT FOUND"
+        }
+    ).Count
+
+
+$DuplicateObjectCount =
+    @(
+        $ObjectOccurrenceMap.GetEnumerator() |
+        Where-Object {
+            $_.Value -gt 1
+        }
+    ).Count
+
+
+# ============================================================
+# FINAL SUMMARY
+# ============================================================
+
+Write-Host ""
+Write-Host "========================================================" `
+    -ForegroundColor Green
+
+Write-Host "AZURE RBAC + PIM REPORT COMPLETED" `
+    -ForegroundColor Green
+
+Write-Host "========================================================" `
+    -ForegroundColor Green
+
+
+Write-Host ""
+Write-Host `
+    "Input rows                  : $($InputRows.Count)" `
+    -ForegroundColor White
+
+Write-Host `
+    "Output rows                 : $($Results.Count)" `
+    -ForegroundColor White
+
+
+Write-Host ""
+Write-Host `
+    "Normal RBAC                 : $NormalCount" `
+    -ForegroundColor Green
+
+Write-Host `
+    "PIM Eligible                : $PIMEligibleCount" `
+    -ForegroundColor Magenta
+
+Write-Host `
+    "PIM Active / Time-Bound     : $PIMActiveCount" `
+    -ForegroundColor Magenta
+
+
+Write-Host ""
+Write-Host `
+    "MG Normal RBAC              : $MGNormalCount" `
+    -ForegroundColor Green
+
+Write-Host `
+    "MG PIM Eligible             : $MGEligibleCount" `
+    -ForegroundColor Magenta
+
+Write-Host `
+    "MG PIM Active / Time-Bound  : $MGActiveCount" `
+    -ForegroundColor Magenta
+
+
+Write-Host ""
+Write-Host `
+    "No Role / PIM Assignment    : $NoAssignmentCount" `
+    -ForegroundColor Yellow
+
+Write-Host `
+    "Object Not Found            : $NotFoundCount" `
+    -ForegroundColor Yellow
+
+Write-Host `
+    "Duplicate input objects     : $DuplicateObjectCount" `
+    -ForegroundColor Yellow
+
+
+Write-Host ""
+Write-Host `
+    "Output file                 : $OutputCsv" `
+    -ForegroundColor Cyan
+
+Write-Host ""
+Write-Host "========================================================" `
+    -ForegroundColor Green
+
+
+# ============================================================
+# DISPLAY RESULTS IN POWERSHELL
+# ============================================================
+
+Write-Host ""
+Write-Host "========================================================" `
+    -ForegroundColor Cyan
+
+Write-Host "RESULT PREVIEW" `
+    -ForegroundColor Cyan
+
+Write-Host "========================================================" `
+    -ForegroundColor Cyan
+
+
+$Results |
+    Select-Object `
+        InputSubscription,
+        SubscriptionId,
+        ObjectName,
+        ObjectType,
+        ObjectId,
+        DuplicateObject,
+        RoleName,
+        AssignmentType,
+        AssignmentStatus,
+        ScopeType,
+        ScopeName,
+        Inherited,
+        Status |
+    Format-Table -AutoSize
