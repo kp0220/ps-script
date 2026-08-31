@@ -1,0 +1,137 @@
+Azure Enterprise App RBAC & PIM Report
+Overview
+
+PowerShell automation to generate an Azure RBAC and PIM permission report for Enterprise Applications (Service Principals) across Azure subscriptions and Management Groups.
+
+The script uses the Enterprise Application Object ID as the principal identifier, avoiding display-name ambiguity.
+
+Input
+
+CSV file with the following columns:
+
+subscription,subscriptionid,Enterprise-app-object-id
+Connectivity,8a79fe1c-45c1-4fb6-81df-5fa1b9f0a3d8,11111111-1111-1111-1111-111111111111
+Dev-Test,b14faae7-cd5f-4fdb-857d-7b55a3131809,22222222-2222-2222-2222-222222222222
+
+Input fields
+Field	Description
+subscription	Azure subscription name
+subscriptionid	Azure Subscription ID
+Enterprise-app-object-id	Microsoft Entra Service Principal Object ID
+
+Important: Enterprise-app-object-id must be the Service Principal Object ID, not the Application/Client ID.
+
+Prerequisites
+PowerShell Modules
+Install-Module Az.Accounts -Scope CurrentUser
+Install-Module Az.Resources -Scope CurrentUser
+
+Azure Access
+
+The executing account requires read access to:
+
+Target Azure subscriptions
+Azure RBAC assignments and role definitions
+PIM role eligibility and assignment schedules
+Management Groups and their hierarchy
+Configuration
+
+Update the paths at the beginning of the script:
+
+$InputCsv  = "C:\Temp\Get-permission.csv"
+$OutputCsv = "C:\Temp\test-out.csv"
+
+Execution
+
+Run from PowerShell:
+
+.\Get-EnterpriseApp-RBAC-PIM.ps1
+
+
+Authenticate when prompted by Connect-AzAccount.
+
+Checks Performed
+
+The report evaluates:
+
+Subscription Normal / Permanent RBAC
+Subscription PIM Eligible
+Subscription PIM Active / Time-Bound
+Management Group Normal / Permanent RBAC
+Management Group PIM Eligible
+Management Group PIM Active / Time-Bound
+
+Management Group assignments are reported as inherited permissions where applicable.
+
+Output
+
+The generated CSV contains:
+
+Subscription information
+Enterprise Application name and Object ID
+Application / Client ID
+Role name and role definition
+Assignment ID
+Assignment type and status
+RBAC scope and scope type
+Inheritance information
+Assignment source
+PIM start/end dates
+Management Group information
+Processing status
+
+Example:
+
+InputSubscription : Connectivity
+SubscriptionId    : 8a79fe1c-45c1-4fb6-81df-5fa1b9f0a3d8
+ObjectType        : ServicePrincipal
+ObjectId          : 11111111-1111-1111-1111-111111111111
+RoleName          : Contributor
+AssignmentType    : Normal / Permanent
+AssignmentStatus  : Active
+ScopeType         : Subscription
+Inherited         : No
+Status             : SUCCESS - NORMAL RBAC
+
+Status Values
+
+Common successful statuses:
+
+SUCCESS - NORMAL RBAC
+SUCCESS - PIM ELIGIBLE
+SUCCESS - PIM ACTIVE
+SUCCESS - MG NORMAL RBAC
+SUCCESS - MG PIM ELIGIBLE
+SUCCESS - MG PIM ACTIVE
+
+
+Common non-success statuses:
+
+OBJECT NOT FOUND
+NO ROLE / PIM ASSIGNMENT
+ERROR SETTING SUBSCRIPTION CONTEXT
+
+Operational Notes
+The script uses Object ID rather than display name for reliable Service Principal identification.
+Exact duplicate result rows are removed before export.
+Role definitions and Management Group relationships are cached to reduce repeated API calls.
+Management Group checks are skipped if the executing account cannot retrieve Management Group information.
+The output contains authorization information and should be handled according to organizational security requirements.
+Recommended Repository Structure
+Azure-EnterpriseApp-RBAC-PIM/
+│
+├── Get-EnterpriseApp-RBAC-PIM.ps1
+├── README.md
+│
+├── Input/
+│   └── EnterpriseApps.csv
+│
+└── Output/
+    └── EnterpriseApps-RBAC-PIM-Report.csv
+
+Version
+
+Version: 1.0
+Purpose: Enterprise Application Azure RBAC and PIM reporting
+Platform: Azure / Microsoft Entra ID
+Automation: PowerShell / Az modules
