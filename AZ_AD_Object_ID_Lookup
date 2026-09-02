@@ -1,0 +1,62 @@
+# Connect to Azure
+Connect-AzAccount
+
+# Input and output CSV paths
+$InputCsv  = "C:\Temp\ObjectIds.csv"
+$OutputCsv = "C:\Temp\AzureObjects_Output.csv"
+
+# Import Object IDs from CSV
+$ObjectIds = Import-Csv -Path $InputCsv
+
+# Process each Object ID
+$Results = foreach ($Item in $ObjectIds) {
+
+    $ObjectId = $Item.ObjectId.Trim()
+
+    if ([string]::IsNullOrWhiteSpace($ObjectId)) {
+        continue
+    }
+
+    # First check if Object ID belongs to a User
+    $User = Get-AzADUser -ObjectId $ObjectId -ErrorAction SilentlyContinue
+
+    if ($User) {
+
+        [PSCustomObject]@{
+            ObjectId    = $ObjectId
+            DisplayName = $User.DisplayName
+            Type        = "User"
+        }
+
+    }
+    else {
+
+        # If not a User, check if it belongs to a Group
+        $Group = Get-AzADGroup -ObjectId $ObjectId -ErrorAction SilentlyContinue
+
+        if ($Group) {
+
+            [PSCustomObject]@{
+                ObjectId    = $ObjectId
+                DisplayName = $Group.DisplayName
+                Type        = "Group"
+            }
+
+        }
+        else {
+
+            # Object ID not found as User or Group
+            [PSCustomObject]@{
+                ObjectId    = $ObjectId
+                DisplayName = "Object Not Found"
+                Type        = "Unknown"
+            }
+        }
+    }
+}
+
+# Export results
+$Results | Export-Csv -Path $OutputCsv -NoTypeInformation
+
+Write-Host "Completed." -ForegroundColor Green
+Write-Host "Output file: $OutputCsv" -ForegroundColor Cyan
