@@ -1,0 +1,145 @@
+Azure AD Object ID Lookup PowerShell Script
+Overview
+This PowerShell script retrieves the Display Name and Object Type for Azure AD / Microsoft Entra ID Object IDs provided in a CSV file.
+
+The script:
+
+Connects to Azure using Connect-AzAccount.
+Reads Object IDs from an input CSV file.
+Checks each Object ID against Azure AD users.
+If the Object ID is not a user, checks whether it belongs to an Azure AD group.
+Identifies objects that cannot be found.
+Exports the results to a CSV file.
+Prerequisites
+Before running the script, ensure the following are available:
+
+PowerShell
+Azure PowerShell (Az) module
+Appropriate permissions to read users and groups in Microsoft Entra ID
+Access to the Azure tenant
+If the Az module is not installed, install it using:
+
+Install-Module Az -Scope CurrentUser
+
+Verify that the required commands are available:
+
+Get-Command Connect-AzAccount
+Get-Command Get-AzADUser
+Get-Command Get-AzADGroup
+
+Input CSV Format
+The input CSV must contain a column named:
+
+ObjectId
+
+Example:
+
+ObjectId
+11111111-1111-1111-1111-111111111111
+22222222-2222-2222-2222-222222222222
+33333333-3333-3333-3333-333333333333
+
+The ObjectId column should contain the Microsoft Entra ID Object ID of a user or group.
+
+File Paths
+By default, the script expects the input file at:
+
+C:\Temp\ObjectIds.csv
+
+The results are written to:
+
+C:\Temp\AzureObjects_Output.csv
+
+These paths can be changed in the script:
+
+$InputCsv  = "C:\Temp\ObjectIds.csv"
+$OutputCsv = "C:\Temp\AzureObjects_Output.csv"
+
+How the Script Works
+For each Object ID, the script first attempts to find a user:
+
+$User = Get-AzADUser -ObjectId $ObjectId -ErrorAction SilentlyContinue
+
+If a user is found, the result is recorded as:
+
+Type = User
+
+If the Object ID is not associated with a user, the script checks for a group:
+
+$Group = Get-AzADGroup -ObjectId $ObjectId -ErrorAction SilentlyContinue
+
+If a group is found, the result is recorded as:
+
+Type = Group
+
+If the Object ID is neither a user nor a group, the script records:
+
+DisplayName = Object Not Found
+Type = Unknown
+
+Output CSV
+The output CSV contains three columns:
+
+Column	Description
+ObjectId	Microsoft Entra ID Object ID
+DisplayName	Display name of the user or group
+Type	User, Group, or Unknown
+
+Example output:
+
+ObjectId,DisplayName,Type
+11111111-1111-1111-1111-111111111111,John Smith,User
+22222222-2222-2222-2222-222222222222,Finance Team,Group
+33333333-3333-3333-3333-333333333333,Object Not Found,Unknown
+
+Running the Script
+Save the PowerShell script as:
+
+Get-AzureObjectDetails.ps1
+
+Place your input CSV at:
+
+C:\Temp\ObjectIds.csv
+
+Run PowerShell and execute:
+
+.\Get-AzureObjectDetails.ps1
+
+The script will prompt for Azure authentication if required.
+
+After completion, the results will be available at:
+
+C:\Temp\AzureObjects_Output.csv
+
+Example
+Input
+ObjectId
+a1234567-1234-1234-1234-123456789abc
+b1234567-1234-1234-1234-123456789abc
+c1234567-1234-1234-1234-123456789abc
+
+Output
+ObjectId,DisplayName,Type
+a1234567-1234-1234-1234-123456789abc,John Smith,User
+b1234567-1234-1234-1234-123456789abc,IT Administrators,Group
+c1234567-1234-1234-1234-123456789abc,Object Not Found,Unknown
+
+Error Handling
+The script uses:
+
+-ErrorAction SilentlyContinue
+
+when querying users and groups. This prevents an individual Object ID lookup failure from stopping the entire script.
+
+Blank Object IDs are also skipped:
+
+if ([string]::IsNullOrWhiteSpace($ObjectId)) {
+    continue
+}
+
+Notes
+The script checks users first, followed by groups.
+The Object ID must be a valid Microsoft Entra ID Object ID.
+The account running the script must have sufficient permissions to read users and groups.
+The script does not modify any Azure resources; it performs read-only lookups and creates a local CSV file.
+Existing output files with the same name may be overwritten when the script is executed.
