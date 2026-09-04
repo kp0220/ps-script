@@ -1,0 +1,353 @@
+Azure VNET Inventory PowerShell Script
+Overview
+
+This PowerShell script collects Azure Virtual Network (VNET) inventory information from multiple Azure subscriptions.
+
+The script reads a CSV file containing the Subscription ID and Subscription Name, connects to each subscription, retrieves all VNETs, and exports the collected information to a CSV file.
+
+The generated report contains:
+
+Subscription ID
+Subscription Name
+VNET Name
+Resource Group
+Azure Region / Location
+VNET Address Space
+Subnet Name
+Subnet Address Range
+
+Each subnet is reported as a separate row in the output CSV.
+
+Prerequisites
+
+Before running the script, make sure the following requirements are met.
+
+1. PowerShell
+
+The script can be run using:
+
+Windows PowerShell 5.1
+PowerShell 7.x
+
+PowerShell 7.x is recommended.
+
+2. Azure PowerShell Module
+
+The script requires the following Azure PowerShell modules:
+
+Az.Accounts
+Az.Network
+
+To install the complete Az module:
+
+Install-Module Az -Scope CurrentUser
+
+
+Or install only the required modules:
+
+Install-Module Az.Accounts -Scope CurrentUser
+Install-Module Az.Network -Scope CurrentUser
+
+
+To verify the installed Az version:
+
+Get-InstalledModule Az
+
+Azure Permissions
+
+The Azure account used to execute the script must have permission to read network resources in the target subscriptions.
+
+At minimum, the account should have read access to:
+
+Virtual Networks
+Subnets
+Resource Groups
+
+A role such as Reader at the subscription level is generally sufficient for collecting this inventory.
+
+The user/service principal must have access to all subscriptions listed in the input CSV.
+
+Input CSV File
+
+The script expects a CSV file containing the Azure Subscription ID and Subscription Name.
+
+Example
+
+Create a file named:
+
+subscriptions.csv
+
+
+Example contents:
+
+SubscriptionId,SubscriptionName
+xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx,Production
+yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy,Development
+zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz,Test
+
+CSV Columns
+Column	Description	Required
+SubscriptionId	Azure Subscription ID	Yes
+SubscriptionName	Azure Subscription Name	Yes
+
+The column names must match the names expected by the script.
+
+Script Configuration
+
+The script uses the following input and output file paths:
+
+$CsvPath = ".\subscriptions.csv"
+$OutputCsv = ".\Azure-VNET-Inventory.csv"
+
+
+You can modify these paths if required.
+
+For example:
+
+$CsvPath = "C:\Azure\Input\subscriptions.csv"
+$OutputCsv = "C:\Azure\Output\Azure-VNET-Inventory.csv"
+
+How to Run
+Step 1: Save the Script
+
+Save the PowerShell script as:
+
+Get-AzureVNETInventory.ps1
+
+
+Place the script and CSV file in the same directory:
+
+Azure-VNET-Inventory\
+│
+├── Get-AzureVNETInventory.ps1
+└── subscriptions.csv
+
+Step 2: Login to Azure
+
+The script performs an interactive Azure login using:
+
+Connect-AzAccount
+
+
+Run the script:
+
+.\Get-AzureVNETInventory.ps1
+
+
+You will be prompted to authenticate to Azure.
+
+Step 3: Select the Required Azure Account
+
+If your account has access to multiple Azure tenants, you may need to select the appropriate tenant during authentication.
+
+Step 4: Wait for Processing
+
+The script processes each subscription from the CSV.
+
+Example console output:
+
+Processing Subscription: Production [xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx]
+  VNet: VNET-PROD-01
+  VNet: VNET-PROD-02
+
+Processing Subscription: Development [yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy]
+  VNet: VNET-DEV-01
+
+VNET inventory completed.
+Output file: .\Azure-VNET-Inventory.csv
+
+Output File
+
+After successful execution, the script creates:
+
+Azure-VNET-Inventory.csv
+
+Output Columns
+Column	Description
+SubscriptionId	Azure Subscription ID
+SubscriptionName	Azure Subscription Name
+VNetName	Name of the Virtual Network
+ResourceGroup	Resource Group containing the VNET
+Location	Azure region where the VNET is deployed
+AddressSpace	VNET address space / CIDR ranges
+SubnetName	Name of the subnet
+SubnetAddressRange	Address range / CIDR assigned to the subnet
+Example Output
+SubscriptionId,SubscriptionName,VNetName,ResourceGroup,Location,AddressSpace,SubnetName,SubnetAddressRange
+xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx,Production,VNET-PROD-01,RG-Network-Prod,Central India,10.10.0.0/16,AppSubnet,10.10.1.0/24
+xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx,Production,VNET-PROD-01,RG-Network-Prod,Central India,10.10.0.0/16,DBSubnet,10.10.2.0/24
+yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy,Development,VNET-DEV-01,RG-Network-Dev,East US,10.20.0.0/16,AppSubnet,10.20.1.0/24
+
+How the Script Works
+
+The script performs the following operations:
+
+Imports the subscription list from the CSV file.
+Connects to Azure using Connect-AzAccount.
+Reads each subscription from the CSV.
+Sets the Azure subscription context using Set-AzContext.
+Retrieves all VNETs using Get-AzVirtualNetwork.
+Extracts:
+VNET name
+Resource group
+Location
+Address space
+Enumerates all subnets within each VNET.
+Extracts the subnet name and address range.
+Creates an inventory object for each subnet.
+Exports the complete inventory to a CSV file.
+Continues processing other subscriptions if an individual subscription encounters an error.
+Error Handling
+
+The script uses a try/catch block when processing each subscription.
+
+If a subscription cannot be accessed or an error occurs, the script displays a warning similar to:
+
+WARNING: Failed to process subscription Production
+[xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx].
+Error: The client does not have authorization...
+
+
+The script then continues processing the remaining subscriptions.
+
+This prevents a single inaccessible subscription from stopping the entire inventory process.
+
+Important Considerations
+Subscription Access
+
+The subscription must be accessible by the Azure account used for authentication.
+
+You can verify the subscriptions available to your account with:
+
+Get-AzSubscription
+
+Subscription ID Accuracy
+
+Ensure that the SubscriptionId values in the CSV are valid Azure subscription IDs.
+
+Subscription Name
+
+The SubscriptionName is primarily used for reporting. The script uses the SubscriptionId to set the Azure subscription context.
+
+VNETs Without Subnets
+
+If a VNET does not contain any subnets, the script still includes the VNET in the output. The subnet-related fields will be blank.
+
+Multiple Address Spaces
+
+A VNET can contain multiple address spaces. These are combined into the AddressSpace column and separated by semicolons.
+
+For example:
+
+10.10.0.0/16; 10.20.0.0/16
+
+Troubleshooting
+Error: Get-AzVirtualNetwork is not recognized
+
+Install the Azure Network module:
+
+Install-Module Az.Network -Scope CurrentUser
+
+
+Then import it:
+
+Import-Module Az.Network
+
+Error: Connect-AzAccount is not recognized
+
+Install the Azure Accounts module:
+
+Install-Module Az.Accounts -Scope CurrentUser
+
+
+Then try:
+
+Connect-AzAccount
+
+Error: Authorization Failed
+
+Verify that your Azure account has at least read access to the subscription and its network resources.
+
+Check the current context:
+
+Get-AzContext
+
+
+Check available subscriptions:
+
+Get-AzSubscription
+
+Script Cannot Run Because Script Execution Is Disabled
+
+If PowerShell blocks the script, check the execution policy:
+
+Get-ExecutionPolicy
+
+
+If permitted by your organization's security policy, you can run:
+
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+
+
+Then execute:
+
+.\Get-AzureVNETInventory.ps1
+
+Recommended Folder Structure
+
+A simple project structure is:
+
+Azure-VNET-Inventory/
+│
+├── Get-AzureVNETInventory.ps1
+├── subscriptions.csv
+├── Azure-VNET-Inventory.csv
+└── README.md
+
+
+The output CSV can be removed and regenerated each time the script runs.
+
+Example Execution
+PS C:\Azure\Azure-VNET-Inventory> .\Get-AzureVNETInventory.ps1
+
+Processing Subscription: Production [xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx]
+  VNet: VNET-PROD-01
+  VNet: VNET-PROD-02
+
+Processing Subscription: Development [yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy]
+  VNet: VNET-DEV-01
+
+VNET inventory completed.
+Output file: .\Azure-VNET-Inventory.csv
+
+Security Notes
+Do not store Azure passwords or credentials in the PowerShell script.
+Use Azure interactive authentication or an approved service principal / managed identity.
+Do not commit sensitive authentication information to source-control repositories.
+Ensure the input CSV does not contain unnecessary sensitive information.
+Follow your organization's Azure RBAC and security policies.
+Summary
+
+This script provides a simple way to generate a consolidated Azure VNET inventory across multiple subscriptions from a CSV subscription list.
+
+The resulting report can be used for:
+
+Network inventory
+IP address management
+Azure network audits
+Migration planning
+Network documentation
+Compliance reporting
+VNET and subnet analysis
+
+Input: subscriptions.csv
+
+Output: Azure-VNET-Inventory.csv
+
+Authentication: Connect-AzAccount
+
+Primary Azure cmdlets:
+
+Connect-AzAccount
+Set-AzContext
+Get-AzVirtualNetwork
