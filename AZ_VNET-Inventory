@@ -1,0 +1,96 @@
+# Requires Az.Accounts and Az.Network
+# Install if required:
+# Install-Module Az -Scope CurrentUser
+
+# Login to Azure
+Connect-AzAccount
+
+# Input / Output files
+$CsvPath = ".\subscriptions.csv"
+$OutputCsv = ".\Azure-VNET-Inventory.csv"
+
+# Import subscription list
+$Subscriptions = Import-Csv -Path $CsvPath
+
+# Array to store results
+$VnetInventory = @()
+
+foreach ($Subscription in $Subscriptions) {
+
+    $SubscriptionId = $Subscription.SubscriptionId
+    $SubscriptionName = $Subscription.SubscriptionName
+
+    Write-Host "Processing Subscription: $SubscriptionName [$SubscriptionId]" -ForegroundColor Cyan
+
+    try {
+        # Set current Azure subscription context
+        Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop | Out-Null
+
+        # Get all VNets in the subscription
+        $VNets = Get-AzVirtualNetwork -ErrorAction Stop
+
+        foreach ($VNet in $VNets) {
+
+            Write-Host "  VNet: $($VNet.Name)" -ForegroundColor Green
+
+            # Address spaces
+            $AddressSpaces = $VNet.AddressSpace.AddressPrefixes -join "; "
+
+            # Process each subnet
+            if ($VNet.Subnets.Count -gt 0) {
+
+                foreach ($Subnet in $VNet.Subnets) {
+
+                    $SubnetAddressPrefixes = @()
+
+                    # Depending on Azure/Module version, Prefix may be populated
+                    if ($Subnet.AddressPrefix) {
+                        $SubnetAddressPrefixes += $Subnet.AddressPrefix
+                    }
+
+                    if ($Subnet.AddressPrefixes) {
+                        $SubnetAddressPrefixes += $Subnet.AddressPrefixes
+                    }
+
+                    $SubnetRange = ($SubnetAddressPrefixes | Select-Object -Unique) -join "; "
+
+                    $VnetInventory += [PSCustomObject]@{
+                        SubscriptionId   = $SubscriptionId
+                        SubscriptionName = $SubscriptionName
+                        VNetName         = $VNet.Name
+                        ResourceGroup    = $VNet.ResourceGroupName
+                        Location         = $VNet.Location
+                        AddressSpace     = $AddressSpaces
+                        SubnetName       = $Subnet.Name
+                        SubnetAddressRange = $SubnetRange
+                    }
+                }
+            }
+            else {
+
+                # Include VNet even if it has no subnet
+                $VnetInventory += [PSCustomObject]@{
+                    SubscriptionId   = $SubscriptionId
+                    SubscriptionName = $SubscriptionName
+                    VNetName         = $VNet.Name
+                    ResourceGroup    = $VNet.ResourceGroupName
+                    Location         = $VNet.Location
+                    AddressSpace     = $AddressSpaces
+                    SubnetName       = ""
+                    SubnetAddressRange = ""
+                }
+            }
+        }
+    }
+    catch {
+        Write-Warning "Failed to process subscription $SubscriptionName [$SubscriptionId]. Error: $($_.Exception.Message)"
+    }
+}
+
+# Export results
+$VnetInventory |
+    Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8
+
+Write-Host ""
+Write-Host "VNET inventory completed." -ForegroundColor Green
+Write-Host "Output file: $OutputCsv" -ForegroundColor Yellow
